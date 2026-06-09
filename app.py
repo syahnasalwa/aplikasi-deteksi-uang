@@ -1,97 +1,139 @@
 import streamlit as st
 from ultralytics import YOLO
-from PIL import Image
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+import av
+import cv2
 import numpy as np
-import tempfile
 
+# ==================================================
+# KONFIGURASI HALAMAN
+# ==================================================
 st.set_page_config(
-    page_title="Deteksi Mata Uang ASEAN",
-    page_icon="💰",
+    page_title="Real-time Deteksi Mata Uang ASEAN",
+    page_icon="🎥",
     layout="centered"
 )
 
-st.title("💰 Deteksi Mata Uang ASEAN")
-st.markdown("Deteksi uang kertas dari negara-negara Asia Tenggara")
+st.title("🎥 REAL-TIME DETEKSI MATA UANG ASEAN")
+st.markdown("**Arahkan kamera ke uang kertas, deteksi LANGSUNG muncul!**")
 
-# Load model
+# ==================================================
+# LOAD MODEL
+# ==================================================
 @st.cache_resource
 def load_model():
     return YOLO('best.pt')
 
 try:
     model = load_model()
-    st.success("✅ Model siap digunakan!")
+    st.success("✅ Model AI siap! Aktifkan kamera untuk mulai deteksi.")
 except Exception as e:
     st.error(f"❌ Gagal load model: {e}")
     st.stop()
 
-# Pilihan input
-option = st.radio("Pilih sumber gambar:", ["📁 Upload Gambar", "📷 Kamera"])
-
-image = None
-
-if option == "📁 Upload Gambar":
-    uploaded = st.file_uploader("Pilih gambar uang...", type=['jpg', 'jpeg', 'png'])
-    if uploaded:
-        image = Image.open(uploaded)
-
-else:  # Kamera
-    image = st.camera_input("Ambil foto uang")
-
-# Tombol deteksi
-if st.button("🔍 DETEKSI SEKARANG", use_container_width=True) and image is not None:
-    # Konversi ke numpy array
-    img_array = np.array(image)
+# ==================================================
+# VIDEO PROCESSOR UNTUK REAL-TIME
+# ==================================================
+class VideoProcessor(VideoTransformerBase):
+    def __init__(self):
+        self.model = model
+        self.confidence_threshold = st.session_state.get('confidence', 0.25)
     
-    with st.spinner("AI sedang menganalisis..."):
-        # Jalankan deteksi
-        results = model(img_array, conf=0.25)
+    def recv(self, frame):
+        # Konversi frame ke format OpenCV
+        img = frame.to_ndarray(format="bgr24")
         
-        # Ambil hasil
-        boxes = results[0].boxes
+        # Jalankan deteksi YOLO di frame ini
+        results = self.model(img, conf=self.confidence_threshold)
         
-        if boxes is not None and len(boxes) > 0:
-            st.success(f"✅ Terdeteksi {len(boxes)} mata uang!")
-            
-            # Map nama kelas ke tampilan yang rapi
-            currency_names = {
-                'malaysia': '🇲🇾 Ringgit Malaysia',
-                'indonesia': '🇮🇩 Rupiah Indonesia',
-                'thailand': '🇹🇭 Baht Thailand',
-                'vietnam': '🇻🇳 Dong Vietnam',
-                'philippines': '🇵🇭 Peso Filipina',
-                'laos': '🇱🇦 Kip Laos',
-                'myanmar': '🇲🇲 Kyat Myanmar',
-                'cambodia': '🇰🇭 Riel Kamboja',
-                'singapore': '🇸🇬 Dollar Singapore',
-                'brunei': '🇧🇳 Dollar Brunei'
-            }
-            
-            # Tampilkan daftar deteksi
-            st.subheader("📋 Hasil Deteksi:")
-            for box in boxes:
-                class_id = int(box.cls[0])
-                class_name = model.names[class_id].lower()
-                confidence = float(box.conf[0]) * 100
-                
-                display_name = currency_names.get(class_name, class_name.title())
-                st.markdown(f"- {display_name}: **{confidence:.1f}%**")
-            
-            # Tampilkan gambar dengan bounding box
-            result_img = results[0].plot()
-            st.image(result_img, caption="Hasil Deteksi", use_container_width=True)
-            
-        else:
-            st.warning("⚠️ Tidak ada mata uang yang terdeteksi. Coba dengan:")
-            st.markdown("""
-            - Pencahayaan yang lebih baik
-            - Uang dalam keadaan rata (tidak terlipat)
-            - Latar belakang polos
-            """)
+        # Gambar bounding box di frame
+        annotated_frame = results[0].plot()
+        
+        # Balikin ke bentuk video
+        return av.VideoFrame.from_ndarray(annotated_frame, format="bgr24")
 
-elif st.button("🔍 DETEKSI SEKARANG", use_container_width=True):
-    st.error("❌ Upload atau ambil foto dulu!")
+# ==================================================
+# SLIDER UNTUK MENGATUR SENSITIVITAS
+# ==================================================
+st.sidebar.header("⚙️ Pengaturan")
 
-# Footer
+confidence = st.sidebar.slider(
+    "🎯 Confidence Threshold (Sensitivity)",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.25,
+    step=0.05,
+    help="Semakin rendah nilainya, semakin sensitif (tapi bisa lebih banyak false positive)"
+)
+
+# Simpan ke session state
+if 'confidence' not in st.session_state:
+    st.session_state.confidence = confidence
+else:
+    st.session_state.confidence = confidence
+
+# Tampilkan info di sidebar
+st.sidebar.markdown("---")
+st.sidebar.markdown(f"""
+### 📊 Info:
+- **Current Threshold:** {confidence:.2f}
+- **Mode:** {'Sensitif' if confidence < 0.3 else 'Normal' if confidence < 0.6 else 'Ketat'}
+""")
+
+# ==================================================
+# TAMPILAN WEBCAM REAL-TIME
+# ==================================================
 st.markdown("---")
-st.caption("Model YOLOv8 | Training dengan dataset Roboflow | Deteksi Mata Uang ASEAN")
+
+# Tombol start/stop webcam
+webrtc_ctx = webrtc_streamer(
+    key="deteksi-uang-realtime",
+    video_processor_factory=VideoProcessor,
+    media_stream_constraints={
+        "video": {
+            "width": {"ideal": 640},
+            "height": {"ideal": 480},
+            "facingMode": "environment"  # pakai kamera belakang di HP
+        },
+        "audio": False
+    },
+    rtc_configuration={
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    }
+)
+
+# ==================================================
+# STATUS & PETUNJUK
+# ==================================================
+if webrtc_ctx.state.playing:
+    st.success("🎥 **KAMERA AKTIF!** Arahkan ke uang kertas, bounding box akan muncul otomatis.")
+    
+    # Tampilkan daftar mata uang yang bisa dideteksi
+    with st.expander("📋 Mata uang yang bisa dideteksi", expanded=False):
+        st.markdown("""
+        - 🇲🇾 Ringgit Malaysia
+        - 🇮🇩 Rupiah Indonesia
+        - 🇹🇭 Baht Thailand
+        - 🇻🇳 Dong Vietnam
+        - 🇵🇭 Peso Filipina
+        - 🇱🇦 Kip Laos
+        - 🇲🇲 Kyat Myanmar
+        - 🇰🇭 Riel Kamboja
+        - 🇸🇬 Dollar Singapore
+        """)
+else:
+    st.info("⏸️ **Kamera belum aktif.** Klik 'START' di atas untuk memulai deteksi real-time.")
+    st.markdown("""
+    ### 📌 Cara Penggunaan:
+    1. Klik tombol **START** (di atas, frame video)
+    2. Izinkan akses kamera
+    3. Arahkan kamera ke uang kertas
+    4. **Bounding box hijau akan muncul langsung** di layar!
+    5. Gunakan slider di samping kiri untuk mengatur sensitivitas
+    """)
+
+# ==================================================
+# FOOTER
+# ==================================================
+st.markdown("---")
+st.caption("🎯 Real-time detection dengan YOLOv8 | Streamlit WebRTC | Deteksi Mata Uang ASEAN")
